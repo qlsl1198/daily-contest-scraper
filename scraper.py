@@ -3,32 +3,40 @@ import requests
 from bs4 import BeautifulSoup
 
 def get_wevity_contests():
-    print("마스터, 정보를 요약 중입니다...")
+    print("마스터, 풍성한 리스트를 준비 중입니다...")
     url = "https://www.wevity.com/"
-    headers = {'User-Agent': 'Mozilla/5.0...'} # 기존 헤더 사용
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
     
     response = requests.get(url, headers=headers)
     soup = BeautifulSoup(response.text, 'html.parser')
+    
+    # 공모전 리스트 추출
     contest_list = soup.select('.wevity-main-list li')
     
-    # --- 여기서부터 수정: 아주 간결한 포맷 ---
     import datetime
     today = datetime.datetime.now().strftime('%Y-%m-%d')
     
-    result_text = f"📅 {today} 공모전 요약\n"
-    result_text += "------------------\n"
+    result_text = f"🏆 **{today} 공모전 데일리 리포트** 🏆\n"
+    result_text += "*(최신 업데이트 및 진행 중인 공모전 Top 15)*\n"
+    result_text += "------------------------------------------\n"
     
-    for i, contest in enumerate(contest_list[:5]): # 딱 5개만!
+    # 5개에서 15개로 대폭 확장! (신규가 없어도 지난 며칠간의 데이터가 나옵니다)
+    for i, contest in enumerate(contest_list[:15]):
         title_tag = contest.select_one('.tit a')
+        # 위비티에서 기간/D-day 정보도 가져오기 (부실함을 막아주는 핵심!)
+        dday_tag = contest.select_one('.day') 
+        
         if title_tag:
             title = title_tag.text.strip()
-            # 제목이 너무 길면 잘라버리는 센스 (선택 사항)
-            display_title = (title[:25] + '..') if len(title) > 25 else title
+            dday = dday_tag.text.strip() if dday_tag else "진행중"
             link = "https://www.wevity.com/" + title_tag['href']
             
-            # [번호] 제목 (링크) 형태로 한 줄 요약
-            result_text += f"{i+1}. {display_title} [바로가기]({link})\n"
+            # [D-Day] 제목 [링크] 형태로 구성
+            result_text += f"{i+1}. **[{dday}]** {title[:30]} [🔗]({link})\n"
             
+    result_text += "\n------------------------------------------\n"
+    result_text += "💡 상세 내용은 위비티 홈페이지를 확인하세요!"
+    
     return result_text
 
 def send_telegram(text):
