@@ -3,25 +3,31 @@ import requests
 from bs4 import BeautifulSoup
 
 def get_wevity_contests():
-    print("마스터, 위비티에서 공모전 정보를 수집 중입니다...")
+    print("마스터, 정보를 요약 중입니다...")
     url = "https://www.wevity.com/"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
+    headers = {'User-Agent': 'Mozilla/5.0...'} # 기존 헤더 사용
     
     response = requests.get(url, headers=headers)
     soup = BeautifulSoup(response.text, 'html.parser')
-    
     contest_list = soup.select('.wevity-main-list li')
     
-    result_text = "🏆 **오늘의 위비티 신규 공모전 업데이트** 🏆\n\n"
+    # --- 여기서부터 수정: 아주 간결한 포맷 ---
+    import datetime
+    today = datetime.datetime.now().strftime('%Y-%m-%d')
     
-    for i, contest in enumerate(contest_list[:5]):
+    result_text = f"📅 {today} 공모전 요약\n"
+    result_text += "------------------\n"
+    
+    for i, contest in enumerate(contest_list[:5]): # 딱 5개만!
         title_tag = contest.select_one('.tit a')
         if title_tag:
             title = title_tag.text.strip()
+            # 제목이 너무 길면 잘라버리는 센스 (선택 사항)
+            display_title = (title[:25] + '..') if len(title) > 25 else title
             link = "https://www.wevity.com/" + title_tag['href']
-            result_text += f"{i+1}. [{title}]({link})\n"
+            
+            # [번호] 제목 (링크) 형태로 한 줄 요약
+            result_text += f"{i+1}. {display_title} [바로가기]({link})\n"
             
     return result_text
 
