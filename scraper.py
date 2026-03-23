@@ -15,7 +15,7 @@ def get_wevity_new_contests():
     }
 
     # 영서햄이 주신 신규 리스트 전용 URL
-    url = "https://www.wevity.com/?c=find&s=1&gub=&cidx=&gbn=list&mode=new"
+    url = "https://www.all-con.co.kr/"
     
     try:
         # 세션을 사용해 쿠키를 생성하며 접속
