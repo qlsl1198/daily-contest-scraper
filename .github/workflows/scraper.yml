@@ -1,0 +1,42 @@
+name: Daily Contest Scraper
+
+on:
+  schedule:
+    # 매일 한국 시간 오전 9시에 자동 실행 (UTC 기준 0시)
+    - cron: '0 0 * * *'
+  workflow_dispatch: # 우리가 지금 바로 테스트해볼 수 있게 해주는 수동 버튼!
+
+# 깃허브 Issue(게시판)에 글을 쓸 수 있도록 권한 부여
+permissions:
+  issues: write
+
+jobs:
+  scrape-and-notify:
+    runs-on: ubuntu-latest
+    steps:
+    - name: 🗂️ 저장소 코드 가져오기
+      uses: actions/checkout@v4
+
+    - name: 🐍 파이썬 환경 세팅
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: 📦 필요 라이브러리 설치
+      run: pip install -r requirements.txt
+
+    - name: 🚀 스크래핑 및 텔레그램 발송
+      env:
+        # 아까 금고(Secrets)에 넣어둔 비밀번호를 꺼내옵니다.
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: python scraper.py
+
+    - name: 📝 깃허브 Issue로 5점짜리 결과 올리기
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # 오늘 날짜 구하기
+        TODAY=$(date +'%Y년 %m월 %d일')
+        # 파이썬이 만든 마크다운 파일을 읽어서 게시판(Issue)에 등록!
+        gh issue create --title "🏆 $TODAY 위비티 공모전 업데이트" --body-file issue_body.md
