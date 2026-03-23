@@ -1,11 +1,31 @@
-import os # 맨 위 import 부분에 이거 하나 추가해주세요!
+import os
 import requests
 from bs4 import BeautifulSoup
 
-# ... (get_wevity_contests 함수는 그대로 두세요) ...
+def get_wevity_contests():
+    print("마스터, 위비티에서 공모전 정보를 수집 중입니다...")
+    url = "https://www.wevity.com/"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
+    response = requests.get(url, headers=headers)
+    soup = BeautifulSoup(response.text, 'html.parser')
+    
+    contest_list = soup.select('.wevity-main-list li')
+    
+    result_text = "🏆 **오늘의 위비티 신규 공모전 업데이트** 🏆\n\n"
+    
+    for i, contest in enumerate(contest_list[:5]):
+        title_tag = contest.select_one('.tit a')
+        if title_tag:
+            title = title_tag.text.strip()
+            link = "https://www.wevity.com/" + title_tag['href']
+            result_text += f"{i+1}. [{title}]({link})\n"
+            
+    return result_text
 
 def send_telegram(text):
-    # 단호한 보안 패치: 코드가 아닌 깃허브 환경변수(Secrets)에서 값을 가져옵니다.
     bot_token = os.environ.get('TELEGRAM_BOT_TOKEN') 
     chat_id = os.environ.get('TELEGRAM_CHAT_ID')
     
@@ -34,7 +54,6 @@ scraped_data = get_wevity_contests()
 # 2. 텔레그램으로 보내기
 send_telegram(scraped_data)
 
-# --- (여기서부터 아래 두 줄만 새로 추가하세요!) ---
-# 3. 깃허브 웹(Issue)에 올리기 위해 마크다운 파일로 저장
+# 3. 깃허브 웹(Issue)에 올리기 위해 마크다운 파일로 저장 (5점짜리 핵심!)
 with open("issue_body.md", "w", encoding="utf-8") as f:
     f.write(scraped_data)
