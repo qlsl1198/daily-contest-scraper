@@ -62,12 +62,17 @@ def send_telegram(text):
     else:
         print(f"전송 실패 ㅠㅠ: {response.text}")
 
-# 1. 공모전 데이터 긁어오기
+# --- scraper.py 맨 아랫부분 ---
+
+# 1. 데이터 가져오기
 scraped_data = get_wevity_contests()
 
-# 2. 텔레그램으로 보내기
+# 2. 텔레그램 쏘기
 send_telegram(scraped_data)
 
-# 3. 깃허브 웹(Issue)에 올리기 위해 마크다운 파일로 저장 (5점짜리 핵심!)
+# 3. 5점짜리 결과물 파일로 저장 (내용이 안 나오는 걸 방지하기 위해 확실히 기록)
+# 인코딩 설정을 utf-8로 명시해서 글자가 깨지거나 생략되는 걸 막습니다.
 with open("issue_body.md", "w", encoding="utf-8") as f:
     f.write(scraped_data)
+
+print("파일 저장 완료! 이제 깃허브 액션이 이 파일을 읽어갈 겁니다.")
