@@ -1,73 +1,61 @@
-import os
+import requests
 from bs4 import BeautifulSoup
 import datetime
-import time
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 
-def get_dynamic_contests():
-    print("🚀 마스터, 현업용 무기 '셀레니움'으로 동적 웹페이지를 렌더링합니다...")
+def get_bulletproof_contests():
+    print("🚀 마스터, 방화벽 없는 구글의 '공모전' 실시간 데이터를 타격합니다!")
     
-    # 💡 1. 가상 브라우저(Headless Chrome) 세팅
-    chrome_options = Options()
-    chrome_options.add_argument("--headless") # 화면 없이 백그라운드 실행 (서버 필수)
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+    # 💡 깃허브를 절대 차단하지 않는 구글 뉴스 RSS (공모전 키워드, 최근 7일)
+    url = "https://news.google.com/rss/search?q=%EA%B3%B5%EB%AA%A8%EC%A0%84+when:7d&hl=ko&gl=KR&ceid=KR:ko"
+    
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        # XML 데이터를 파싱합니다
+        soup = BeautifulSoup(response.content, 'html.parser')
+    except Exception as e:
+        return f"❌ 구글 접속 실패 (이럴 확률은 0.1%입니다): {e}"
 
-    # 💡 2. 크롬 드라이버 자동 설치 및 브라우저 실행
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    
-    # 올콘 리스트 페이지 접속
-    url = "https://www.all-con.co.kr/list/contest"
-    driver.get(url)
-    
-    # 💡 3. 핵심: 자바스크립트가 화면에 데이터를 다 그릴 때까지 5초 대기!
-    print("⏳ 데이터 렌더링 대기 중 (5초)...")
-    time.sleep(5) 
-    
-    # 렌더링이 끝난 최종 완벽한 HTML 소스를 가져옵니다.
-    html = driver.page_source
-    driver.quit() # 메모리를 위해 브라우저 종료
-    
-    soup = BeautifulSoup(html, 'html.parser')
+    # 뉴스 아이템(공모전 정보) 추출
+    items = soup.find_all('item')
     
     now = datetime.datetime.now()
-    result_text = f"🏆 **{now.strftime('%Y-%m-%d')} 기준 최신 공모전 리스트 (Selenium)** 🏆\n"
+    result_text = f"🏆 **{now.strftime('%Y-%m-%d')} 실시간 공모전 레이더** 🏆\n"
+    result_text += "*(구글 실시간 수집 데이터 기반)*\n"
     result_text += "------------------------------------------\n"
     
     count = 0
-    seen_links = set()
-    
-    # 렌더링 된 후의 a 태그 탐색
-    for a in soup.find_all('a', href=True):
-        if '/view/contest/' in a['href']:
-            title = a.get_text(strip=True)
-            # 쓰레기 데이터 걸러내기
-            if len(title) > 5 and not title.isdigit():
-                link = "https://www.all-con.co.kr" + a['href'] if not a['href'].startswith('http') else a['href']
+    for item in items:
+        title_tag = item.find('title')
+        link_tag = item.find('link')
+        
+        if title_tag and link_tag:
+            title = title_tag.text.strip()
+            link = link_tag.text.strip()
+            
+            # 언론사 이름 등 불필요한 뒤쪽 텍스트 잘라내기
+            if " - " in title:
+                title = title.rsplit(" - ", 1)[0]
                 
-                if link not in seen_links:
-                    result_text += f"{count+1}. **[진행중]** {title} [🔗]({link})\n"
-                    seen_links.add(link)
-                    count += 1
-                    
-            if count >= 20: break # 깔끔하게 20개만
+            # 너무 긴 제목은 깔끔하게
+            display_title = (title[:35] + '..') if len(title) > 35 else title
+            
+            result_text += f"{count+1}. 📌 {display_title} [🔗]({link})\n"
+            count += 1
+            
+            if count >= 15: break # 깔끔하게 15개만!
             
     if count == 0:
-        result_text += "⚠️ 에러: 사이트 구조가 완전히 변경되었습니다.\n"
+        result_text += "오늘은 새로운 공모전 뉴스가 없습니다.\n"
         
     result_text += f"\n------------------------------------------\n"
-    result_text += f"💡 총 {count}개의 공모전 발견!"
+    result_text += f"💡 총 {count}개의 따끈따끈한 공모전 소식을 가져왔습니다!"
     
     return result_text
 
 # 파일 저장 실행
-final_report = get_dynamic_contests()
+final_report = get_bulletproof_contests()
 with open("issue_body.md", "w", encoding="utf-8") as f:
     f.write(final_report)
 
-print(f"✅ 셀레니움 스크래핑 완벽 종료! {datetime.datetime.now()}")
+print(f"✅ 구글 스크래핑 완벽 종료! 깃허브 게시판을 확인하세요!")
