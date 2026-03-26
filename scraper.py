@@ -17,16 +17,22 @@ GOOGLE_RSS_URL = (
     "https://news.google.com/rss/search?q=%EA%B3%B5%EB%AA%A8%EC%A0%84+when:7d&hl=ko&gl=KR&ceid=KR:ko"
 )
 
-# GitHub Actions 등에서 'compatible' UA는 빈 페이지/차단에 걸리는 경우가 있어 일반 브라우저 UA 사용
+# requests 폴백용(일부 환경에서만 사용). 위비티는 WAF/봇 차단이 있어 curl_cffi(크롬 TLS 지문) 우선.
 REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/131.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
     "Referer": "https://www.wevity.com/",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 # HTML 원문에서 <a href=...gbn=view...ix=...>제목</a> 추출 (BS4가 못 잡을 때 폴백)
@@ -146,14 +152,47 @@ def _collect_wevity_rows_from_regex(page_html: str) -> list[tuple[str, str]]:
     return rows
 
 
-def _fetch_wevity_page(url: str) -> str:
+def _fetch_wevity_page_with_requests(url: str) -> str:
+    """urllib3 기본 TLS. 일부 서버에서 403이 나면 curl_cffi를 쓰세요."""
     session = requests.Session()
     session.headers.update(REQUEST_HEADERS)
-    r = session.get(url, timeout=20)
+    # 메인 방문 후 쿠키·세션 확보
+    session.get(WEVITY_BASE, timeout=20)
+    r = session.get(
+        url,
+        timeout=25,
+        headers={**REQUEST_HEADERS, "Referer": WEVITY_BASE.rstrip("/") + "/"},
+    )
     r.raise_for_status()
     if r.encoding is None or r.encoding == "ISO-8859-1":
         r.encoding = r.apparent_encoding or "utf-8"
     return r.text
+
+
+def _fetch_wevity_page(url: str) -> str:
+    """
+    위비티는 datacenter/GitHub Actions IP에서 403을 주는 경우가 많음.
+    curl_cffi(Chrome TLS 지문 모방) + 메인 페이지 워밍업으로 우회 시도.
+    """
+    try:
+        from curl_cffi import requests as curl_requests
+
+        session = curl_requests.Session()
+        session.get(WEVITY_BASE, impersonate="chrome120", timeout=25)
+        r = session.get(
+            url,
+            impersonate="chrome120",
+            timeout=30,
+            headers={**REQUEST_HEADERS, "Referer": WEVITY_BASE.rstrip("/") + "/"},
+        )
+        r.raise_for_status()
+        return r.text
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"(위비티 curl_cffi 실패, requests로 재시도: {e})")
+
+    return _fetch_wevity_page_with_requests(url)
 
 
 def get_wevity_contests() -> str:
@@ -163,7 +202,14 @@ def get_wevity_contests() -> str:
     try:
         page_html = _fetch_wevity_page(WEVITY_LIST_URL)
     except Exception as e:
-        return f"❌ 위비티 접속 실패: {e}\n"
+        extra = ""
+        if "403" in str(e) or "Forbidden" in str(e):
+            extra = (
+                "\n\n> GitHub Actions 등 일부 IP는 위비티에서 **403**으로 막힐 수 있습니다. "
+                "이미 `curl_cffi`(Chrome TLS)로 우회를 시도합니다. 계속 실패하면 로컬 실행이나 "
+                "별도 프록시/스케줄러를 검토해야 합니다."
+            )
+        return f"❌ 위비티 접속 실패: {e}{extra}\n"
 
     soup = BeautifulSoup(page_html, "html.parser")
     soup_rows = _collect_wevity_rows_from_soup(soup)
