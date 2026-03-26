@@ -205,12 +205,13 @@ def _collect_wevity_rows_from_regex(page_html: str) -> list[tuple[str, str]]:
     return rows
 
 
-def _fetch_wevity_page_with_requests(url: str) -> str:
-    """urllib3 기본 TLS. 일부 서버에서 403이 나면 curl_cffi를 쓰세요."""
-    session = requests.Session()
-    session.headers.update(REQUEST_HEADERS)
-    # 메인 방문 후 쿠키·세션 확보
-    session.get(WEVITY_BASE, timeout=20)
+def _fetch_wevity_page_with_requests(url: str, session: requests.Session | None = None) -> str:
+    """urllib3 기본 TLS. session이 있으면 재사용(쿠키 유지)."""
+    own = session is None
+    if own:
+        session = requests.Session()
+        session.headers.update(REQUEST_HEADERS)
+        session.get(WEVITY_BASE, timeout=20)
     r = session.get(
         url,
         timeout=25,
@@ -222,30 +223,60 @@ def _fetch_wevity_page_with_requests(url: str) -> str:
     return r.text
 
 
-def _fetch_wevity_direct(url: str) -> str:
-    """
-    위비티 직접 요청. datacenter IP에서는 403이 날 수 있음.
-    curl_cffi(Chrome TLS) → 실패 시 requests.
-    """
+# Jina Reader는 wevity 목록에서 gp 쿼리를 반영하지 않고 동일 본문을 주는 경우가 많음 → 페이지네이션에 쓰면 안 됨.
+WEVITY_CURL_IMPERSONATE = ("chrome120", "chrome110", "chrome107")
+
+
+def _open_wevity_fetch_state() -> tuple[object | None, requests.Session]:
+    """curl_cffi 세션(가능 시) + requests 세션. 목록 gp 루프에서 공유해 쿠키 유지."""
+    curl_sess = None
     try:
         from curl_cffi import requests as curl_requests
 
-        session = curl_requests.Session()
-        session.get(WEVITY_BASE, impersonate="chrome120", timeout=25)
-        r = session.get(
-            url,
-            impersonate="chrome120",
-            timeout=30,
-            headers={**REQUEST_HEADERS, "Referer": WEVITY_BASE.rstrip("/") + "/"},
-        )
-        r.raise_for_status()
-        return r.text
+        curl_sess = curl_requests.Session()
+        curl_sess.get(WEVITY_BASE, impersonate="chrome120", timeout=25)
     except ImportError:
         pass
     except Exception as e:
-        print(f"(위비티 curl_cffi 실패, requests로 재시도: {e})")
+        print(f"(위비티 curl 세션 초기화 실패, requests 위주로 시도: {e})")
 
-    return _fetch_wevity_page_with_requests(url)
+    req_sess = requests.Session()
+    req_sess.headers.update(REQUEST_HEADERS)
+    try:
+        req_sess.get(WEVITY_BASE, timeout=20)
+    except Exception as e:
+        print(f"(위비티 requests 세션 초기화: {e})")
+
+    return curl_sess, req_sess
+
+
+def _fetch_wevity_direct_with_state(url: str, curl_sess: object | None, req_sess: requests.Session) -> str:
+    """
+    위비티 직접 요청. datacenter IP에서는 403이 날 수 있음.
+    curl_cffi(여러 Chrome TLS 지문) → 실패 시 requests.
+    """
+    last: Exception | None = None
+    if curl_sess is not None:
+        for imp in WEVITY_CURL_IMPERSONATE:
+            try:
+                r = curl_sess.get(
+                    url,
+                    impersonate=imp,
+                    timeout=35,
+                    headers={**REQUEST_HEADERS, "Referer": WEVITY_BASE.rstrip("/") + "/"},
+                )
+                r.raise_for_status()
+                return r.text
+            except Exception as e:
+                last = e
+        print(f"(위비티 curl_cffi 전 impersonate 실패: {last})")
+
+    try:
+        return _fetch_wevity_page_with_requests(url, session=req_sess)
+    except Exception as e:
+        if last is not None:
+            raise last from e
+        raise
 
 
 def _fetch_wevity_via_jina_reader(target_url: str) -> str:
@@ -266,11 +297,23 @@ def _fetch_wevity_via_jina_reader(target_url: str) -> str:
     return r.text
 
 
-def _fetch_wevity_direct_or_jina(url: str) -> tuple[str, str]:
-    """(본문, 'html' | 'jina'). 직접 실패 시 Jina."""
+def _fetch_wevity_direct_or_jina(
+    url: str,
+    curl_sess: object | None,
+    req_sess: requests.Session,
+    *,
+    allow_jina: bool,
+) -> tuple[str, str]:
+    """
+    (본문, 'html' | 'jina').
+    Jina는 wevity 목록에서 gp별로 다른 페이지를 주지 않는 경우가 있어,
+    gp>=2일 때는 allow_jina=False로 두고 직접 HTML만 사용한다.
+    """
     try:
-        return _fetch_wevity_direct(url), "html"
+        return _fetch_wevity_direct_with_state(url, curl_sess, req_sess), "html"
     except Exception as e:
+        if not allow_jina:
+            raise
         print(f"(직접 실패 → Jina Reader: {url[:72]}… — {e})")
         return _fetch_wevity_via_jina_reader(url), "jina"
 
@@ -292,6 +335,10 @@ def get_wevity_contests(collected_at: datetime.datetime | None = None) -> str:
     seen_ix: set[str] = set()
     rows: list[tuple[str, str]] = []
     direct_err: Exception | None = None
+    jina_used = False
+    stopped_gp2_no_direct = False
+
+    curl_sess, req_sess = _open_wevity_fetch_state()
 
     def append_unique(batch: list[tuple[str, str]]) -> tuple[int, bool]:
         """(이번에 새로 넣은 개수, 상한 도달 여부)"""
@@ -312,13 +359,24 @@ def get_wevity_contests(collected_at: datetime.datetime | None = None) -> str:
         if WEVITY_MAX_ITEMS > 0 and len(rows) >= WEVITY_MAX_ITEMS:
             break
         url = _wevity_list_page_url(gp)
+        allow_jina = gp == 1
         try:
-            body, kind = _fetch_wevity_direct_or_jina(url)
+            body, kind = _fetch_wevity_direct_or_jina(
+                url, curl_sess, req_sess, allow_jina=allow_jina
+            )
         except Exception as e:
-            print(f"(gp={gp} 페이지 가져오기 실패: {e})")
             if gp == 1:
                 direct_err = e
+                print(f"(gp={gp} 페이지 가져오기 실패: {e})")
+            else:
+                stopped_gp2_no_direct = True
+                print(
+                    f"(gp={gp} 직접 접속 실패 — Jina Reader는 목록 페이지마다 다른 gp를 "
+                    f"반영하지 않아 사용하지 않음: {e})"
+                )
             break
+        if kind == "jina":
+            jina_used = True
         last_gp = gp
         batch = _parse_wevity_fetched_body(body, kind)
         before = len(rows)
@@ -331,7 +389,14 @@ def get_wevity_contests(collected_at: datetime.datetime | None = None) -> str:
 
     if len(rows) < 3:
         try:
-            body, kind = _fetch_wevity_direct_or_jina(WEVITY_LIST_FALLBACK_URL)
+            body, kind = _fetch_wevity_direct_or_jina(
+                WEVITY_LIST_FALLBACK_URL,
+                curl_sess,
+                req_sess,
+                allow_jina=True,
+            )
+            if kind == "jina":
+                jina_used = True
             append_unique(_parse_wevity_fetched_body(body, kind))
         except Exception as ex:
             print(f"(접수중 폴백 URL 실패: {ex})")
@@ -345,15 +410,20 @@ def get_wevity_contests(collected_at: datetime.datetime | None = None) -> str:
     cap_note = ""
     if WEVITY_MAX_ITEMS > 0:
         cap_note = f" · 상한 {WEVITY_MAX_ITEMS}건"
+    jina_note = ""
+    if jina_used:
+        jina_note = " · 1페이지는 Jina Reader 사용(직접 접속 실패 시)"
+    if stopped_gp2_no_direct:
+        jina_note += " · gp≥2는 직접 HTML만 시도(Jina는 페이지별 목록 미지원)"
     print(
         f"(위비티) gp 1~{last_gp or '?'} 페이지 순회 · "
-        f"고유 공모전 {len(rows)}건{cap_note}"
+        f"고유 공모전 {len(rows)}건{cap_note}{jina_note}"
     )
 
     lines = [
         f"### 🏅 위비티 공모전",
         f"*[전체 공모전]({WEVITY_LIST_URL}) · 수집 시각: {_format_collected_at(at)}*",
-        f"*목록 페이지 `gp=1…{WEVITY_MAX_PAGES}` 순회 (실제 수집: ~{last_gp}페이지){cap_note}*",
+        f"*목록 페이지 `gp=1…{WEVITY_MAX_PAGES}` 순회 (실제 수집: ~{last_gp}페이지){cap_note}{jina_note}*",
         "",
     ]
 
