@@ -3,9 +3,21 @@ import html as html_module
 import re
 import xml.etree.ElementTree as ET
 from urllib.parse import parse_qs, urljoin, urlparse
+from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
+
+# 로컬 PC는 보통 맞지만, GitHub Actions는 TZ=UTC라 naive now()가 한국과 어긋남 → KST 고정
+_TZ_KST = ZoneInfo("Asia/Seoul")
+
+
+def _now_kst() -> datetime.datetime:
+    return datetime.datetime.now(_TZ_KST)
+
+
+def _format_collected_at(dt: datetime.datetime) -> str:
+    return dt.strftime("%Y-%m-%d %H:%M") + " (KST)"
 
 WEVITY_BASE = "https://www.wevity.com/"
 WEVITY_LIST_URL = "https://www.wevity.com/?c=find&s=1&gub=1"
@@ -57,8 +69,9 @@ def _short_title(title: str, max_len: int = 35) -> str:
     return (title[:max_len] + "..") if len(title) > max_len else title
 
 
-def get_google_contests() -> str:
+def get_google_contests(collected_at: datetime.datetime | None = None) -> str:
     print("🚀 구글 뉴스 RSS에서 공모전 키워드를 수집합니다.")
+    at = collected_at if collected_at is not None else _now_kst()
 
     try:
         response = requests.get(GOOGLE_RSS_URL, timeout=10)
@@ -69,10 +82,9 @@ def get_google_contests() -> str:
         return f"❌ 구글 접속 실패: {e}\n"
 
     items = root.findall(".//item")
-    now = datetime.datetime.now()
     lines = [
         f"### 📰 구글 뉴스 (최근 7일)",
-        f"*(수집 시각: {now.strftime('%Y-%m-%d %H:%M')})*",
+        f"*(수집 시각: {_format_collected_at(at)})*",
         "",
     ]
 
@@ -250,8 +262,9 @@ def _fetch_wevity_via_jina_reader(target_url: str) -> str:
     return r.text
 
 
-def get_wevity_contests() -> str:
+def get_wevity_contests(collected_at: datetime.datetime | None = None) -> str:
     print("🚀 위비티(wevity.com) 전체 공모전 목록을 수집합니다.")
+    at = collected_at if collected_at is not None else _now_kst()
 
     page_html: str | None = None
     direct_err: Exception | None = None
@@ -308,10 +321,9 @@ def get_wevity_contests() -> str:
         f"(직접 응답에 gbn=view: {bool(page_html and ('gbn=view' in page_html))})"
     )
 
-    now = datetime.datetime.now()
     lines = [
         f"### 🏅 위비티 공모전",
-        f"*[전체 공모전]({WEVITY_LIST_URL}) · 수집 시각: {now.strftime('%Y-%m-%d %H:%M')}*",
+        f"*[전체 공모전]({WEVITY_LIST_URL}) · 수집 시각: {_format_collected_at(at)}*",
         "",
     ]
 
@@ -328,13 +340,13 @@ def get_wevity_contests() -> str:
 
 
 def build_report() -> str:
-    now = datetime.datetime.now()
+    now = _now_kst()
     header = (
         f"# 🏆 **{now.strftime('%Y-%m-%d')} 공모전 레이더** 🏆\n"
-        f"*구글 뉴스 RSS + 위비티*\n"
+        f"*구글 뉴스 RSS + 위비티 · 기준 시각: {_format_collected_at(now)}*\n"
         f"\n---\n\n"
     )
-    body = get_google_contests() + "\n---\n\n" + get_wevity_contests()
+    body = get_google_contests(now) + "\n---\n\n" + get_wevity_contests(now)
     return header + body
 
 
