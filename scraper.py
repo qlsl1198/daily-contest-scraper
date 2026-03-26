@@ -41,6 +41,16 @@ WEVITY_ANCHOR_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Jina Reader 마크다운: [![Image N: 제목](썸네일)](상세링크)
+JINA_MD_IMAGE_VIEW_RE = re.compile(
+    r"Image\s+\d+:\s*([^\]]+)\]\([^)]+\)\]\((https://www\.wevity\.com/\?[^)]+gbn=view[^)]+ix=(\d+)[^)]*)\)",
+    re.IGNORECASE,
+)
+JINA_MD_URL_ONLY_RE = re.compile(
+    r"(https://www\.wevity\.com/\?[^)\s\"]+gbn=view[^)\s\"]+ix=(\d+)[^)\s\"]*)",
+    re.IGNORECASE,
+)
+
 
 def _short_title(title: str, max_len: int = 35) -> str:
     title = title.strip()
@@ -130,6 +140,33 @@ def _merge_wevity_rows(*batches: list[tuple[str, str]]) -> list[tuple[str, str]]
     return out
 
 
+def _collect_wevity_rows_from_jina_markdown(md: str) -> list[tuple[str, str]]:
+    """r.jina.ai 가 반환한 마크다운에서 공모전 링크 추출 (GitHub Actions IP 403 우회용)."""
+    seen_ix: set[str] = set()
+    rows: list[tuple[str, str]] = []
+    for m in JINA_MD_IMAGE_VIEW_RE.finditer(md):
+        title = re.sub(r"\s+", " ", m.group(1).strip())
+        url = m.group(2).strip()
+        ix = m.group(3)
+        if not ix or ix in seen_ix:
+            continue
+        seen_ix.add(ix)
+        rows.append((title, url))
+        if len(rows) >= 15:
+            return rows
+    if len(rows) < 5:
+        for m in JINA_MD_URL_ONLY_RE.finditer(md):
+            url = m.group(1).strip()
+            ix = m.group(2)
+            if not ix or ix in seen_ix:
+                continue
+            seen_ix.add(ix)
+            rows.append((f"위비티 상세 (ix={ix})", url))
+            if len(rows) >= 15:
+                break
+    return rows
+
+
 def _collect_wevity_rows_from_regex(page_html: str) -> list[tuple[str, str]]:
     seen_ix: set[str] = set()
     rows: list[tuple[str, str]] = []
@@ -169,10 +206,10 @@ def _fetch_wevity_page_with_requests(url: str) -> str:
     return r.text
 
 
-def _fetch_wevity_page(url: str) -> str:
+def _fetch_wevity_direct(url: str) -> str:
     """
-    위비티는 datacenter/GitHub Actions IP에서 403을 주는 경우가 많음.
-    curl_cffi(Chrome TLS 지문 모방) + 메인 페이지 워밍업으로 우회 시도.
+    위비티 직접 요청. datacenter IP에서는 403이 날 수 있음.
+    curl_cffi(Chrome TLS) → 실패 시 requests.
     """
     try:
         from curl_cffi import requests as curl_requests
@@ -195,40 +232,80 @@ def _fetch_wevity_page(url: str) -> str:
     return _fetch_wevity_page_with_requests(url)
 
 
+def _fetch_wevity_via_jina_reader(target_url: str) -> str:
+    """
+    Jina AI Reader가 원격에서 페이지를 가져와 텍스트로 돌려줌.
+    GitHub Actions IP가 위비티에 403으로 막힐 때 우회에 사용.
+    """
+    wrapped = "https://r.jina.ai/" + target_url
+    r = requests.get(
+        wrapped,
+        timeout=90,
+        headers={
+            "User-Agent": REQUEST_HEADERS["User-Agent"],
+            "Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8",
+        },
+    )
+    r.raise_for_status()
+    return r.text
+
+
 def get_wevity_contests() -> str:
     print("🚀 위비티(wevity.com) 전체 공모전 목록을 수집합니다.")
 
-    page_html = ""
+    page_html: str | None = None
+    direct_err: Exception | None = None
     try:
-        page_html = _fetch_wevity_page(WEVITY_LIST_URL)
+        page_html = _fetch_wevity_direct(WEVITY_LIST_URL)
     except Exception as e:
-        extra = ""
-        if "403" in str(e) or "Forbidden" in str(e):
-            extra = (
-                "\n\n> GitHub Actions 등 일부 IP는 위비티에서 **403**으로 막힐 수 있습니다. "
-                "이미 `curl_cffi`(Chrome TLS)로 우회를 시도합니다. 계속 실패하면 로컬 실행이나 "
-                "별도 프록시/스케줄러를 검토해야 합니다."
-            )
-        return f"❌ 위비티 접속 실패: {e}{extra}\n"
+        direct_err = e
+        print(f"(위비티 직접 접속 실패: {e})")
 
-    soup = BeautifulSoup(page_html, "html.parser")
-    soup_rows = _collect_wevity_rows_from_soup(soup)
-    regex_rows = _collect_wevity_rows_from_regex(page_html)
-    rows = _merge_wevity_rows(soup_rows, regex_rows)
+    rows: list[tuple[str, str]] = []
+    if page_html and "gbn=view" in page_html:
+        soup = BeautifulSoup(page_html, "html.parser")
+        rows = _merge_wevity_rows(
+            _collect_wevity_rows_from_soup(soup),
+            _collect_wevity_rows_from_regex(page_html),
+        )
+
+    # 직접 응답이 비었거나 항목이 너무 적으면 Jina Reader로 보강 (Actions 403 대응)
+    if len(rows) < 5:
+        try:
+            jina_md = _fetch_wevity_via_jina_reader(WEVITY_LIST_URL)
+            rows = _merge_wevity_rows(rows, _collect_wevity_rows_from_jina_markdown(jina_md))
+        except Exception as ej:
+            print(f"(Jina Reader(메인) 실패: {ej})")
 
     if len(rows) < 3:
         try:
-            alt_html = _fetch_wevity_page(WEVITY_LIST_FALLBACK_URL)
+            alt_html = _fetch_wevity_direct(WEVITY_LIST_FALLBACK_URL)
             alt_soup = BeautifulSoup(alt_html, "html.parser")
-            alt_soup_rows = _collect_wevity_rows_from_soup(alt_soup)
-            alt_regex_rows = _collect_wevity_rows_from_regex(alt_html)
-            rows = _merge_wevity_rows(rows, alt_soup_rows, alt_regex_rows)
+            rows = _merge_wevity_rows(
+                rows,
+                _collect_wevity_rows_from_soup(alt_soup),
+                _collect_wevity_rows_from_regex(alt_html),
+            )
         except Exception as e:
-            print(f"(폴백 URL 재시도 실패: {e})")
+            print(f"(직접 폴백 URL 실패: {e})")
+        try:
+            jina_alt = _fetch_wevity_via_jina_reader(WEVITY_LIST_FALLBACK_URL)
+            rows = _merge_wevity_rows(
+                rows, _collect_wevity_rows_from_jina_markdown(jina_alt)
+            )
+        except Exception as e:
+            print(f"(Jina Reader(폴백) 실패: {e})")
 
+    if not rows and direct_err is not None:
+        return (
+            f"❌ 위비티 접속 실패: {direct_err}\n"
+            f"(직접·Jina Reader 모두에서 목록을 가져오지 못했습니다.)\n"
+        )
+
+    hl = len(page_html) if page_html else 0
     print(
-        f"(위비티) HTML 길이={len(page_html)} · 파싱된 항목 수={len(rows)} "
-        f"(원문에 gbn=view 문자열: {'gbn=view' in page_html})"
+        f"(위비티) 직접 HTML 길이={hl} · 파싱된 항목 수={len(rows)} "
+        f"(직접 응답에 gbn=view: {bool(page_html and ('gbn=view' in page_html))})"
     )
 
     now = datetime.datetime.now()
