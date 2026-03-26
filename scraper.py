@@ -1,5 +1,6 @@
 import datetime
 import html as html_module
+import os
 import re
 import xml.etree.ElementTree as ET
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -21,6 +22,14 @@ def _format_collected_at(dt: datetime.datetime) -> str:
 
 WEVITY_BASE = "https://www.wevity.com/"
 WEVITY_LIST_URL = "https://www.wevity.com/?c=find&s=1&gub=1"
+# 목록은 gp=1,2,3… 페이지로 나뉨. 전부 순회 (기본 최대 50페이지).
+WEVITY_MAX_PAGES = max(1, int(os.environ.get("WEVITY_MAX_PAGES", "50")))
+# 0이면 개수 제한 없음(페이지 상한까지만). 이슈 본문이 매우 길어질 수 있음.
+WEVITY_MAX_ITEMS = int(os.environ.get("WEVITY_MAX_ITEMS", "0"))
+
+
+def _wevity_list_page_url(gp: int) -> str:
+    return f"https://www.wevity.com/?c=find&s=1&gub=1&gp={gp}"
 # 목록만 있는 모드(슬라이더/레이아웃이 다른 경우 대비)
 WEVITY_LIST_FALLBACK_URL = (
     "https://www.wevity.com/?c=find&s=1&gub=1&gbn=list&mode=ing"
@@ -130,13 +139,14 @@ def _collect_wevity_rows_from_soup(soup: BeautifulSoup) -> list[tuple[str, str]]
             continue
         seen_ix.add(ix)
         rows.append((title, full_url))
-        if len(rows) >= 15:
-            break
     return rows
 
 
-def _merge_wevity_rows(*batches: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """여러 소스에서 온 (제목, URL)을 ix 기준으로 합치고 최대 15개까지."""
+def _merge_wevity_rows(
+    *batches: list[tuple[str, str]],
+    max_items: int | None = None,
+) -> list[tuple[str, str]]:
+    """여러 소스에서 온 (제목, URL)을 ix 기준으로 합침. max_items가 있으면 그만큼만."""
     seen_ix: set[str] = set()
     out: list[tuple[str, str]] = []
     for batch in batches:
@@ -147,7 +157,7 @@ def _merge_wevity_rows(*batches: list[tuple[str, str]]) -> list[tuple[str, str]]
                 continue
             seen_ix.add(ix)
             out.append((title, url))
-            if len(out) >= 15:
+            if max_items is not None and len(out) >= max_items:
                 return out
     return out
 
@@ -164,8 +174,6 @@ def _collect_wevity_rows_from_jina_markdown(md: str) -> list[tuple[str, str]]:
             continue
         seen_ix.add(ix)
         rows.append((title, url))
-        if len(rows) >= 15:
-            return rows
     if len(rows) < 5:
         for m in JINA_MD_URL_ONLY_RE.finditer(md):
             url = m.group(1).strip()
@@ -174,8 +182,6 @@ def _collect_wevity_rows_from_jina_markdown(md: str) -> list[tuple[str, str]]:
                 continue
             seen_ix.add(ix)
             rows.append((f"위비티 상세 (ix={ix})", url))
-            if len(rows) >= 15:
-                break
     return rows
 
 
@@ -196,8 +202,6 @@ def _collect_wevity_rows_from_regex(page_html: str) -> list[tuple[str, str]]:
             title = f"위비티 상세 (ix={ix})"
         seen_ix.add(ix)
         rows.append((title, full_url))
-        if len(rows) >= 15:
-            break
     return rows
 
 
@@ -262,52 +266,75 @@ def _fetch_wevity_via_jina_reader(target_url: str) -> str:
     return r.text
 
 
+def _fetch_wevity_direct_or_jina(url: str) -> tuple[str, str]:
+    """(본문, 'html' | 'jina'). 직접 실패 시 Jina."""
+    try:
+        return _fetch_wevity_direct(url), "html"
+    except Exception as e:
+        print(f"(직접 실패 → Jina Reader: {url[:72]}… — {e})")
+        return _fetch_wevity_via_jina_reader(url), "jina"
+
+
+def _parse_wevity_fetched_body(body: str, kind: str) -> list[tuple[str, str]]:
+    if kind == "html":
+        soup = BeautifulSoup(body, "html.parser")
+        return _merge_wevity_rows(
+            _collect_wevity_rows_from_soup(soup),
+            _collect_wevity_rows_from_regex(body),
+        )
+    return _collect_wevity_rows_from_jina_markdown(body)
+
+
 def get_wevity_contests(collected_at: datetime.datetime | None = None) -> str:
     print("🚀 위비티(wevity.com) 전체 공모전 목록을 수집합니다.")
     at = collected_at if collected_at is not None else _now_kst()
 
-    page_html: str | None = None
-    direct_err: Exception | None = None
-    try:
-        page_html = _fetch_wevity_direct(WEVITY_LIST_URL)
-    except Exception as e:
-        direct_err = e
-        print(f"(위비티 직접 접속 실패: {e})")
-
+    seen_ix: set[str] = set()
     rows: list[tuple[str, str]] = []
-    if page_html and "gbn=view" in page_html:
-        soup = BeautifulSoup(page_html, "html.parser")
-        rows = _merge_wevity_rows(
-            _collect_wevity_rows_from_soup(soup),
-            _collect_wevity_rows_from_regex(page_html),
-        )
+    direct_err: Exception | None = None
 
-    # 직접 응답이 비었거나 항목이 너무 적으면 Jina Reader로 보강 (Actions 403 대응)
-    if len(rows) < 5:
+    def append_unique(batch: list[tuple[str, str]]) -> tuple[int, bool]:
+        """(이번에 새로 넣은 개수, 상한 도달 여부)"""
+        added = 0
+        for title, url in batch:
+            ix = parse_qs(urlparse(url).query).get("ix", [None])[0]
+            if not ix or ix in seen_ix:
+                continue
+            seen_ix.add(ix)
+            rows.append((title, url))
+            added += 1
+            if WEVITY_MAX_ITEMS > 0 and len(rows) >= WEVITY_MAX_ITEMS:
+                return added, True
+        return added, False
+
+    last_gp = 0
+    for gp in range(1, WEVITY_MAX_PAGES + 1):
+        if WEVITY_MAX_ITEMS > 0 and len(rows) >= WEVITY_MAX_ITEMS:
+            break
+        url = _wevity_list_page_url(gp)
         try:
-            jina_md = _fetch_wevity_via_jina_reader(WEVITY_LIST_URL)
-            rows = _merge_wevity_rows(rows, _collect_wevity_rows_from_jina_markdown(jina_md))
-        except Exception as ej:
-            print(f"(Jina Reader(메인) 실패: {ej})")
+            body, kind = _fetch_wevity_direct_or_jina(url)
+        except Exception as e:
+            print(f"(gp={gp} 페이지 가져오기 실패: {e})")
+            if gp == 1:
+                direct_err = e
+            break
+        last_gp = gp
+        batch = _parse_wevity_fetched_body(body, kind)
+        before = len(rows)
+        _, hit_limit = append_unique(batch)
+        added = len(rows) - before
+        if hit_limit:
+            break
+        if gp > 1 and added == 0:
+            break
 
     if len(rows) < 3:
         try:
-            alt_html = _fetch_wevity_direct(WEVITY_LIST_FALLBACK_URL)
-            alt_soup = BeautifulSoup(alt_html, "html.parser")
-            rows = _merge_wevity_rows(
-                rows,
-                _collect_wevity_rows_from_soup(alt_soup),
-                _collect_wevity_rows_from_regex(alt_html),
-            )
-        except Exception as e:
-            print(f"(직접 폴백 URL 실패: {e})")
-        try:
-            jina_alt = _fetch_wevity_via_jina_reader(WEVITY_LIST_FALLBACK_URL)
-            rows = _merge_wevity_rows(
-                rows, _collect_wevity_rows_from_jina_markdown(jina_alt)
-            )
-        except Exception as e:
-            print(f"(Jina Reader(폴백) 실패: {e})")
+            body, kind = _fetch_wevity_direct_or_jina(WEVITY_LIST_FALLBACK_URL)
+            append_unique(_parse_wevity_fetched_body(body, kind))
+        except Exception as ex:
+            print(f"(접수중 폴백 URL 실패: {ex})")
 
     if not rows and direct_err is not None:
         return (
@@ -315,15 +342,18 @@ def get_wevity_contests(collected_at: datetime.datetime | None = None) -> str:
             f"(직접·Jina Reader 모두에서 목록을 가져오지 못했습니다.)\n"
         )
 
-    hl = len(page_html) if page_html else 0
+    cap_note = ""
+    if WEVITY_MAX_ITEMS > 0:
+        cap_note = f" · 상한 {WEVITY_MAX_ITEMS}건"
     print(
-        f"(위비티) 직접 HTML 길이={hl} · 파싱된 항목 수={len(rows)} "
-        f"(직접 응답에 gbn=view: {bool(page_html and ('gbn=view' in page_html))})"
+        f"(위비티) gp 1~{last_gp or '?'} 페이지 순회 · "
+        f"고유 공모전 {len(rows)}건{cap_note}"
     )
 
     lines = [
         f"### 🏅 위비티 공모전",
         f"*[전체 공모전]({WEVITY_LIST_URL}) · 수집 시각: {_format_collected_at(at)}*",
+        f"*목록 페이지 `gp=1…{WEVITY_MAX_PAGES}` 순회 (실제 수집: ~{last_gp}페이지){cap_note}*",
         "",
     ]
 
