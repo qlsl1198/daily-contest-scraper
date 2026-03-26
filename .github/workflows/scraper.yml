@@ -1,5 +1,9 @@
 name: Daily Contest Scraper
 
+# Node 20 기반 액션 경고 대응: 러너에서 Node 24로 JS 액션 실행(권장 설정)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   schedule:
     # 매일 한국 시간 오전 9시에 자동 실행 (UTC 기준 0시)
@@ -15,10 +19,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: 🗂️ 저장소 코드 가져오기
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: 🐍 파이썬 환경 세팅
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: '3.10'
 
